@@ -1518,30 +1518,21 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         return pendingTransactions;
     }
 
-    //get withdraw transaction's amount
-    function getWithdrawAmount(uint256 _transactionId) public isManager view returns(uint256){    
-        return transactions[_transactionId].amount;
-    }
-
-    //get withdraw transaction's signature count
-    function getWithdrawSignCount(uint256 _transactionId) public isManager view returns(uint256){    
-        return transactions[_transactionId].signatureCount;
-    }
-
-    //get withdraw transaction's recipient address
-    function getWithdrawTo(uint256 _transactionId) public isManager view returns(address){    
-        return transactions[_transactionId].to;
-    }
-
-    //get withdraw transaction's request address
-    function getWithdrawFrom(uint256 _transactionId) public isManager view returns(address){    
-        return transactions[_transactionId].from;
-    }
-
-    //get withdraw transaction's request status
-    function getWithdrawStatus(uint256 _transactionId) public isManager view returns(bool){    
-        return transactions[_transactionId].isEnd;
-    }
+    //get withdraw transaction's information
+    function getWithdrawInfo(uint256 _transactionId) public isManager view returns(
+        address _from,
+        address _to,
+        uint256 _amount,
+        uint256 _signatureCount,
+        bool _isEnd
+        )
+    {    
+        _from = transactions[_transactionId].from;
+        _to = transactions[_transactionId].to;
+        _amount = transactions[_transactionId].amount;
+        _signatureCount = transactions[_transactionId].signatureCount;
+        _isEnd = transactions[_transactionId].isEnd;
+    }    
 
     //change manager address
     function delegate(address _delegateTo) public isManager{  
