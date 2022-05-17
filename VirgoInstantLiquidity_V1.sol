@@ -1053,6 +1053,7 @@ pragma solidity ^0.8.0;
 contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
     using SafeMath for uint256;
     using Address for address;
+    using Address for address payable;
 
     string public constant name = 'VirgoInstantLiquidity';
     string public constant version = 'V1';
@@ -1065,13 +1066,15 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
     //multiple manager for signing eth withdraw;
     mapping(address => bool) public managers;  
     //index number for manager address(start from 1)  
-    mapping(address => uint256) public managerIndexes;   
-    //passed manager signature counts for eth withdraw
+    mapping(address => uint256) public managerIndexes;  
+    //manager signature counts 
+    uint256 private constant signCount = 3;   
+    //passed manager signature counts 
     uint256 private constant signedCount = 2;    
 
     //only manager role can sign a request for contract's eth withdraw
     modifier isManager{        
-        require(managers[_msgSender()], "caller is not the owner or manager"); 
+        require(managers[_msgSender()], "caller is not manager"); 
         _;
     }
 
@@ -1079,8 +1082,12 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
     event SellERC1155Fail(address indexed seller, address indexed tokenAddress, uint256 indexed tokenId, uint256 amounts);
     event BuyERC721Fail(address indexed buyer, address indexed tokenAddress, uint256 indexed tokenId);
     event BuyERC1155Fail(address indexed buyer, address indexed tokenAddress, uint256 indexed tokenId, uint256 amounts);  
-    event TransactionCreated(address from, address to, uint amount, uint transactionId);
+    event EthRecordCreated(address from, address to, uint amount, uint ethRecordId);
     event WithdrawETH(address indexed recipient, uint256 amount); 
+    event UpdateOperator(address indexed operatorAddress);
+    event UpdateNFTOwner(address nftOwnerAddress);
+    event Delegate(address from, address to);
+    event CloseTransactions(uint256 ethRecordId);
 
     // keccak256("ERC721Details(address tokenAddr,uint256[] ids,uint256[] price)")
     bytes32 private constant ERC721DETAILS_TYPEHASH = 0xa22e8bf7e119b195a6f04ed0c21241bcc24983bba105b07664defc2dc7e92612;
@@ -1105,7 +1112,7 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         uint256[] unitPrice;
     }
 
-    struct Transaction {        
+    struct EthRecord {        
         address from;
         address to;
         uint256 amount;
@@ -1114,20 +1121,30 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         mapping (uint256 => bool) signatures;   //get sign status according to manager index number 
     }
 
-    mapping (uint256 => Transaction) private transactions;
-    uint256[] private pendingTransactions;     
-    uint256 private transactionNum;    
-    
+    struct RoleUpdateRecord {
+        address to;
+        uint256 signatureCount;
+        bool isUpdating;
+        mapping (uint256 => bool) signatures;   //get sign status according to manager index number 
+    }    
 
-    constructor(address[3] memory _managers) {        
-        require(!_managers[0].isContract() && !_managers[1].isContract(), "Invalid manager address");
+    mapping (uint256 => EthRecord) private ethRecords;
+    uint256[] private pendingEthRecords;     
+    uint256 private ethRecordNum;    
+    RoleUpdateRecord private operatorRecord;
+    RoleUpdateRecord private nftOwnerRecord;
+
+    constructor(address[] memory _managers, address _operator, address _nftOwner) {        
+        require(_managers.length == signCount, "Invalid manager address count");  
+        require(_operator!= address(0) && !_operator.isContract(), "Invalid  operator address");    
+        require(_nftOwner!= address(0) && !_nftOwner.isContract(), "Invalid nftowner address");         
         for (uint256 i = 0; i < _managers.length; i++) {
             require(!_managers[i].isContract(), "Invalid manager address");
             managers[_managers[i]] = true;
             managerIndexes[_managers[i]] = i + 1;
         }  
-        operator = _msgSender();
-        nftOwner = _msgSender();              
+        operator = _operator;
+        nftOwner = _nftOwner;              
         _setDomainSeperator();
     }
 
@@ -1153,20 +1170,99 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
             id := chainid()
         }
         return id;
-    }
+    }   
    
 
-    //update operator address
-    function updateOperator(address _operatorAddress) public onlyOwner {
-    require(_operatorAddress!= address(0) && _operatorAddress != address(this));
-        operator = _operatorAddress;
+    //Update operator address using multi-sign
+    function updateOperator(address _operatorAddress) external isManager {
+        require(_operatorAddress!= address(0) && !_operatorAddress.isContract() && _operatorAddress != operator, "You can not change operator to zero address or contract based address or same  operator address");
+
+        if (!operatorRecord.isUpdating) {
+            operatorRecord.to = _operatorAddress;
+            operatorRecord.signatureCount = 1;            
+            operatorRecord.isUpdating = true;
+            operatorRecord.signatures[managerIndexes[_msgSender()]] = true;
+        } 
+        else {
+            require(_operatorAddress == operatorRecord.to,"The new operator address you signed is not requested!");
+            require(!operatorRecord.signatures[managerIndexes[_msgSender()]],"You have signed!");
+            operatorRecord.signatures[managerIndexes[_msgSender()]] = true;
+            operatorRecord.signatureCount+=1;    
+            if(operatorRecord.signatureCount >= signedCount){       
+                operator = _operatorAddress;
+                emit UpdateOperator(_operatorAddress);
+                _clearOperatorRecord();
+            }
+        }        
     }
 
-     //update nft owner address
-    function updateNFTOwner(address _nftOwnerAddress) public onlyOwner {
-    require(_nftOwnerAddress!= address(0) && !_nftOwnerAddress.isContract());
-        nftOwner = _nftOwnerAddress;
+     //Update nft owner address using multi-sign
+    function updateNFTOwner(address _nftOwnerAddress) external isManager {
+        require(_nftOwnerAddress!= address(0) && !_nftOwnerAddress.isContract() && _nftOwnerAddress != nftOwner, "You can not change nft ownerAddress to zero address or contract based address or same nftowner address");
+
+        if (!nftOwnerRecord.isUpdating) {
+            nftOwnerRecord.to = _nftOwnerAddress;
+            nftOwnerRecord.signatureCount = 1;            
+            nftOwnerRecord.isUpdating = true;
+            nftOwnerRecord.signatures[managerIndexes[_msgSender()]] = true;
+        } 
+        else {
+            require(_nftOwnerAddress == nftOwnerRecord.to,"The new nftowner address you signed is not requested!");
+            require(!nftOwnerRecord.signatures[managerIndexes[_msgSender()]],"You have signed!");
+            nftOwnerRecord.signatures[managerIndexes[_msgSender()]] = true;
+            nftOwnerRecord.signatureCount+=1;    
+            if(nftOwnerRecord.signatureCount >= signedCount){       
+                nftOwner = _nftOwnerAddress;
+                emit UpdateNFTOwner(_nftOwnerAddress);
+                _clearNFTOwnerRecord();
+            }
+        }  
     }
+
+    //Clear the operatorRecord 
+    function _clearOperatorRecord() internal {
+        operatorRecord.to = address(0);
+        operatorRecord.signatureCount = 0;
+        operatorRecord.isUpdating = false;
+        for (uint256 i = 0; i < signCount; i++) {
+            operatorRecord.signatures[i+1] = false;
+        }
+    }
+
+    //Clear the nftOwnerRecord 
+    function _clearNFTOwnerRecord() internal {
+        nftOwnerRecord.to = address(0);
+        nftOwnerRecord.signatureCount = 0;
+        nftOwnerRecord.isUpdating = false;
+        for (uint256 i = 0; i < signCount; i++) {
+            nftOwnerRecord.signatures[i+1] = false;
+        }
+    }
+
+    //get operator updating record
+    function getOperatorRecord() external view isManager returns(        
+        address _to,
+        uint256 _signatureCount,
+        bool _isUpdating
+        )
+    {            
+        _to = operatorRecord.to;
+        _signatureCount = operatorRecord.signatureCount;
+        _isUpdating = operatorRecord.isUpdating;
+    }    
+
+    //get nftowner updating record
+    function getNFTOwnerRecord() external view isManager returns(        
+        address _to,
+        uint256 _signatureCount,
+        bool _isUpdating
+        )
+    {            
+        _to = nftOwnerRecord.to;
+        _signatureCount = nftOwnerRecord.signatureCount;
+        _isUpdating = nftOwnerRecord.isUpdating;
+    }    
+    
 
    //Get the balance of contract
     function getBalance() public view returns(uint){
@@ -1382,7 +1478,7 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         }        
 
         //transfer ETH to user
-        payable(_msgSender()).transfer(_ethAmount);
+        payable(_msgSender()).sendValue(_ethAmount);
     } 
     
 
@@ -1466,11 +1562,11 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         
         //transfer remaining ETH to user
         if (_ethAmount > 0)
-            payable(_msgSender()).transfer(_ethAmount);
+            payable(_msgSender()).sendValue(_ethAmount);
     }   
 
     //batch query NFT approved status
-    function isApprovedForAll(address[] calldata _nftAddress, bool[] calldata _isERC721) public view returns (bool[] memory) {
+    function isApprovedForAll(address[] calldata _nftAddress, bool[] calldata _isERC721) external view returns (bool[] memory) {
         require(_nftAddress.length == _isERC721.length, "_nftAddress and _isERC721 length mismatch");
         bool[] memory batchStatuses = new bool[](_nftAddress.length);
 
@@ -1497,29 +1593,30 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
     
 
     //start a eth withdraw request using multiple signatures
-    function requestWithdrawETH(address _recipient, uint256 _amount) public{
-        require(_msgSender() == owner() || managers[_msgSender()], "Only owner and manager can withdraw eth!");
+    function requestWithdrawETH(address _recipient, uint256 _amount) external{
+        require(managers[_msgSender()], "Only manager can withdraw eth!");
         require(_recipient != address(0), "Transfer to the zero address");
         require(address(this).balance >= _amount,"Insufficient Balance");
 
-        uint256 transactionId = transactionNum++;  
-        Transaction storage transaction =transactions[transactionId];
-        transaction.from = _msgSender();      
-        transaction.to = _recipient;
-        transaction.amount = _amount;
-        transaction.signatureCount = 0;
-        transaction.isEnd = false;
-        pendingTransactions.push(transactionId);
-        emit TransactionCreated(_msgSender(), _recipient, _amount, transactionId);
+        uint256 ethRecordId = ethRecordNum++;  
+        EthRecord storage ethRecord =ethRecords[ethRecordId];
+        ethRecord.from = _msgSender();      
+        ethRecord.to = _recipient;
+        ethRecord.amount = _amount;
+        ethRecord.signatureCount = 1;
+        ethRecord.signatures[managerIndexes[_msgSender()]] = true;
+        ethRecord.isEnd = false;
+        pendingEthRecords.push(ethRecordId);
+        emit EthRecordCreated(_msgSender(), _recipient, _amount, ethRecordId);
     }   
 
     //get pending withdraw transactions list
     function getPendingWithdraws() public isManager view returns(uint256[] memory){    
-        return pendingTransactions;
+        return pendingEthRecords;
     }
 
     //get withdraw transaction's information
-    function getWithdrawInfo(uint256 _transactionId) public isManager view returns(
+    function getWithdrawInfo(uint256 _ethRecordId) external isManager view returns(
         address _from,
         address _to,
         uint256 _amount,
@@ -1527,53 +1624,66 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         bool _isEnd
         )
     {    
-        _from = transactions[_transactionId].from;
-        _to = transactions[_transactionId].to;
-        _amount = transactions[_transactionId].amount;
-        _signatureCount = transactions[_transactionId].signatureCount;
-        _isEnd = transactions[_transactionId].isEnd;
+        _from = ethRecords[_ethRecordId].from;
+        _to = ethRecords[_ethRecordId].to;
+        _amount = ethRecords[_ethRecordId].amount;
+        _signatureCount = ethRecords[_ethRecordId].signatureCount;
+        _isEnd = ethRecords[_ethRecordId].isEnd;
     }    
 
     //change manager address
-    function delegate(address _delegateTo) public isManager{  
+    function delegate(address _delegateTo) external isManager{  
+        require(_delegateTo != address(0), "You can not delegate to the zero address");
         require(_delegateTo !=_msgSender(),"You can not delegate to yourself");
         require(!managers[_delegateTo],"You can not delegate to other manager");
         managers[_delegateTo] = true;  
         managerIndexes[_delegateTo] = managerIndexes[_msgSender()];
         managers[_msgSender()] = false;
         managerIndexes[_msgSender()] = 0;
+        emit Delegate(_msgSender(), _delegateTo);
     }
 
-    //sign for eth withdraw
-    function signTransaction(uint256 _transactionId) public isManager{
-        Transaction storage transaction = transactions[_transactionId];
-        require(!transaction.isEnd, "This transaction is closed");
-        require(transaction.from != _msgSender(), "You can not sign the transaction you request");
-        require(!transaction.signatures[managerIndexes[_msgSender()]],"This transaction have been signed!");
-        transaction.signatures[managerIndexes[_msgSender()]] = true;
-        transaction.signatureCount+=1;       
-        if(transaction.signatureCount >= signedCount ){       
-            require(address(this).balance >= transaction.amount); 
-            payable(transaction.to).transfer(transaction.amount); 
-            emit WithdrawETH(transaction.to, transaction.amount);
-            closeTransactions(_transactionId);
+    //sign for eth withdraw using multi-sign
+    function signEthRecord(uint256 _ethRecordId) external isManager{
+        EthRecord storage ethRecord = ethRecords[_ethRecordId];
+        require(!ethRecord.isEnd, "This transaction is closed");
+        require(ethRecord.from != _msgSender(), "You can not sign the transaction you request");
+        require(!ethRecord.signatures[managerIndexes[_msgSender()]],"You have signed the transaction!");
+        ethRecord.signatures[managerIndexes[_msgSender()]] = true;
+        ethRecord.signatureCount+=1;       
+        if(ethRecord.signatureCount >= signedCount ){       
+            require(address(this).balance >= ethRecord.amount, "Insufficient Balance"); 
+            payable(ethRecord.to).sendValue(ethRecord.amount); 
+            emit WithdrawETH(ethRecord.to, ethRecord.amount);
+            closeTransactions(_ethRecordId);
         }
     }
 
     //delete withdraw transaction in case the array is over
-    function closeTransactions(uint256 _transacionId) public isManager{        
-        require(!transactions[_transacionId].isEnd, "This transaction is closed");
+    function closeTransactions(uint256 _ethRecordId) public isManager{        
+        require(!ethRecords[_ethRecordId].isEnd, "This transaction is closed");
         uint256 temp = 0;
-        for(uint256 i = 0; i< pendingTransactions.length; i++){
+        for(uint256 i = 0; i< pendingEthRecords.length; i++){
             if(1 == temp){
-                pendingTransactions[i-1] = pendingTransactions[i];
-            }else if(_transacionId == pendingTransactions[i]){
+                pendingEthRecords[i-1] = pendingEthRecords[i];
+            }else if(_ethRecordId == pendingEthRecords[i]){
                 temp = 1;
             }
         }
-        delete pendingTransactions[pendingTransactions.length - 1];
-        pendingTransactions.pop();
-        transactions[_transacionId].isEnd = true;   
+        delete pendingEthRecords[pendingEthRecords.length - 1];
+        pendingEthRecords.pop();
+        ethRecords[_ethRecordId].isEnd = true;   
+        emit CloseTransactions(_ethRecordId);
     }
-    
+
+    //Pause trade
+    function pause() external isManager whenNotPaused {
+        _pause();
+    }
+
+    //Unpause trade
+    function unpause() external isManager whenPaused {
+        _unpause();
+    }    
 }
+
