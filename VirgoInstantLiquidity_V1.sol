@@ -1140,6 +1140,7 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         require(_nftOwner!= address(0) && !_nftOwner.isContract(), "Invalid nftowner address");         
         for (uint256 i = 0; i < _managers.length; i++) {
             require(!_managers[i].isContract(), "Invalid manager address");
+            require(!managers[_managers[i]], "Repeated manager address");
             managers[_managers[i]] = true;
             managerIndexes[_managers[i]] = i + 1;
         }  
@@ -1196,6 +1197,11 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         }        
     }
 
+    //Cancel to update operator address
+    function cancelUpdateOperator() external isManager {
+         _clearOperatorRecord();
+    }
+
      //Update nft owner address using multi-sign
     function updateNFTOwner(address _nftOwnerAddress) external isManager {
         require(_nftOwnerAddress!= address(0) && !_nftOwnerAddress.isContract() && _nftOwnerAddress != nftOwner, "You can not change nft ownerAddress to zero address or contract based address or same nftowner address");
@@ -1217,6 +1223,11 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
                 _clearNFTOwnerRecord();
             }
         }  
+    }
+
+    //Cancel to update nft owner address
+    function cancelUpdateNFTOwner() external isManager {
+         _clearNFTOwnerRecord();
     }
 
     //Clear the operatorRecord 
@@ -1670,6 +1681,7 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
                 temp = 1;
             }
         }
+        require(temp == 1, "The _ethRecordId does not exist.");
         delete pendingEthRecords[pendingEthRecords.length - 1];
         pendingEthRecords.pop();
         ethRecords[_ethRecordId].isEnd = true;   
