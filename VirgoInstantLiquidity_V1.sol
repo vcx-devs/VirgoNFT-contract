@@ -1088,15 +1088,17 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
     event UpdateNFTOwner(address nftOwnerAddress);
     event Delegate(address from, address to);
     event CloseTransactions(uint256 ethRecordId);
+    //tradeType (Sell:0   Buy:1)
+    event OrderInfo(uint256 indexed orderId, uint256 indexed tradeType);
 
     // keccak256("ERC721Details(address tokenAddr,uint256[] ids,uint256[] price)")
     bytes32 private constant ERC721DETAILS_TYPEHASH = 0xa22e8bf7e119b195a6f04ed0c21241bcc24983bba105b07664defc2dc7e92612;
     // keccak256("ERC1155Details(address tokenAddr,uint256[] ids,uint256[] amounts,uint256[] unitPrice)")
     bytes32 private constant ERC1155DETAILS_TYPEHASH = 0x74f52a5cd1c2e6f4a7c9e679c7e7f1461ce7b3ef57b04c3546269aa80338d6f9;
-    // keccak256("sellNFTsForETH(ERC721Details[] _erc721Details,ERC1155Details[] _erc1155Details,uint256 _totalPrice,uint256 _deadline)ERC1155Details(address tokenAddr,uint256[] ids,uint256[] amounts,uint256[] unitPrice)ERC721Details(address tokenAddr,uint256[] ids,uint256[] price)")
-    bytes32 private constant SELLNFTSFORETH_TYPEHASH = 0xd4568f9c0428f19382f3817ff5573885c93d2bea1faf3741d360855d5cc40298;
-     // keccak256("buyNFTsForETH(ERC721Details[] _erc721Details,ERC1155Details[] _erc1155Details,uint256 _totalPrice,uint256 _deadline)ERC1155Details(address tokenAddr,uint256[] ids,uint256[] amounts,uint256[] unitPrice)ERC721Details(address tokenAddr,uint256[] ids,uint256[] price)")
-    bytes32 private constant BUYNFTSFORETH_TYPEHASH = 0xcf60296a153a4e8bc8efc4034e78d22dfa5aab926425b81b4c235776b510d4d4;
+    // keccak256("sellNFTsForETH(ERC721Details[] _erc721Details,ERC1155Details[] _erc1155Details,uint256 _totalPrice,uint256 _deadline,uint256 _orderId)ERC1155Details(address tokenAddr,uint256[] ids,uint256[] amounts,uint256[] unitPrice)ERC721Details(address tokenAddr,uint256[] ids,uint256[] price)")
+    bytes32 private constant SELLNFTSFORETH_TYPEHASH = 0xb73baae7c9bec1201806782a92848dc25312dc35645cbdc8088ac1c5c9ab35c7;
+     // keccak256("buyNFTsForETH(ERC721Details[] _erc721Details,ERC1155Details[] _erc1155Details,uint256 _totalPrice,uint256 _deadline,uint256 _orderId)ERC1155Details(address tokenAddr,uint256[] ids,uint256[] amounts,uint256[] unitPrice)ERC721Details(address tokenAddr,uint256[] ids,uint256[] price)")
+    bytes32 private constant BUYNFTSFORETH_TYPEHASH = 0x89138277441e31c4f31b04b4d83b8b8048482d6fff3b13a35eb1baa840a245f4;
     
 
     struct ERC721Details {
@@ -1321,7 +1323,8 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         ERC721Details[] memory _erc721Details,
         ERC1155Details[] memory _erc1155Details, 
         uint256 _totalPrice,
-        uint256 _deadline
+        uint256 _deadline,
+        uint256 _orderId
     ) internal pure returns (bytes32) {   
 
         bytes32[] memory erc721Data = new bytes32[](_erc721Details.length);
@@ -1339,7 +1342,8 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
                                     keccak256(abi.encodePacked(erc721Data)), 
                                     keccak256(abi.encodePacked(erc1155Data)),  
                                     _totalPrice,
-                                    _deadline));
+                                    _deadline,
+                                    _orderId));
                
     }
 
@@ -1363,9 +1367,10 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         ERC1155Details[] memory _erc1155Details,  
         uint256 _totalPrice,
         uint256 _deadline,
+        uint256 _orderId,
         bytes memory signature
     ) internal view returns (bool) {
-        bytes32 messageHash = _getMessageHash(_typeHash, _erc721Details, _erc1155Details, _totalPrice, _deadline);
+        bytes32 messageHash = _getMessageHash(_typeHash, _erc721Details, _erc1155Details, _totalPrice, _deadline, _orderId);
         bytes32 ethSignedMessageHash = _getSignedMessageHash(messageHash);
 
         return _recoverSigner(ethSignedMessageHash, signature) == operator;
@@ -1422,17 +1427,20 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
             ERC1155Details[] calldata _erc1155Details,             
             uint256 _totalPrice,          
             uint256 _deadline,
+            uint256 _orderId,
             bytes calldata _signature
     ) external nonReentrant whenNotPaused{
         require(_deadline >= block.timestamp, 'Trade expired');        
         require(_totalPrice > 0, 'Price must be granter than zero');
-        require(getBalance() >= _totalPrice, 'the liquidity pool is full');        
+        require(getBalance() >= _totalPrice, 'The liquidity pool is full');   
+        require(_msgSender() != nftOwner, "Seller can not be nftOwner");        
         require(_verify(            
             SELLNFTSFORETH_TYPEHASH,             
             _erc721Details, 
             _erc1155Details, 
             _totalPrice,             
             _deadline, 
+            _orderId,
             _signature), 'INVALID_SIGNATURE');
 
         uint256 _ethAmount = 0;
@@ -1490,6 +1498,7 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
 
         //transfer ETH to user
         payable(_msgSender()).sendValue(_ethAmount);
+        emit OrderInfo(_orderId, 0);
     } 
     
 
@@ -1499,17 +1508,20 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         ERC1155Details[] calldata _erc1155Details, 
         uint256 _totalPrice, 
         uint256 _deadline, 
+        uint256 _orderId,
         bytes calldata _signature
     ) external payable nonReentrant whenNotPaused {
         require(_deadline >= block.timestamp, 'Trade expired');    
         require(_totalPrice > 0, 'Price must be granter than zero');
-        require(msg.value >= _totalPrice, "less than listing price");        
+        require(msg.value >= _totalPrice, "Less than listing price");   
+        require(_msgSender() != nftOwner, "Buyer can not be nftOwner");     
         require(_verify(             
             BUYNFTSFORETH_TYPEHASH,
             _erc721Details, 
             _erc1155Details, 
             _totalPrice, 
             _deadline, 
+            _orderId,
             _signature), 'INVALID_SIGNATURE');
 
         uint256 _ethAmount = msg.value;
@@ -1574,6 +1586,7 @@ contract VirgoInstantLiquidity is Ownable, Pausable, ReentrancyGuard {
         //transfer remaining ETH to user
         if (_ethAmount > 0)
             payable(_msgSender()).sendValue(_ethAmount);
+        emit OrderInfo(_orderId, 1);    
     }   
 
     //batch query NFT approved status
